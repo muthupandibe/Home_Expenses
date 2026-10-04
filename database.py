@@ -1,32 +1,87 @@
+import os
+from pathlib import Path
+
 import psycopg2
+from dotenv import load_dotenv
 from psycopg2.extras import RealDictCursor
 
 
 # =========================================================
-# POSTGRESQL CONNECTION SETTINGS
+# LOAD .ENV FILE
 # =========================================================
 
-HOST = "localhost"
-PORT = "5432"
-DATABASE = "Home_Expenses"
-USER = "postgres"
+BASE_DIR = Path(__file__).resolve().parent
+ENV_FILE = BASE_DIR / ".env"
 
-# CHANGE THIS TO YOUR POSTGRESQL PASSWORD
-PASSWORD = "123456"
+load_dotenv(dotenv_path=ENV_FILE)
 
 
 # =========================================================
-# DATABASE CONNECTION
+# POSTGRESQL CONNECTION
 # =========================================================
 
 def get_connection():
+    """
+    Connect to PostgreSQL.
+
+    Priority:
+    1. DATABASE_URL
+       - Render
+       - Streamlit Cloud
+       - Other cloud PostgreSQL providers
+
+    2. Individual DB_* variables
+       - Local PostgreSQL development
+    """
+
+    database_url = os.getenv("DATABASE_URL")
+
+    # -----------------------------------------------------
+    # CLOUD CONNECTION
+    # -----------------------------------------------------
+
+    if database_url:
+
+        # Protect against placeholder DATABASE_URL values
+        if (
+            "@HOST" in database_url
+            or "username:password" in database_url.lower()
+            or "your-" in database_url.lower()
+        ):
+            raise ValueError(
+                "DATABASE_URL contains placeholder values. "
+                "Replace it with the real PostgreSQL connection URL "
+                "or remove DATABASE_URL when testing locally."
+            )
+
+        return psycopg2.connect(
+            database_url,
+            connect_timeout=10
+        )
+
+    # -----------------------------------------------------
+    # LOCAL CONNECTION
+    # -----------------------------------------------------
+
+    host = os.getenv("DB_HOST", "localhost")
+    port = os.getenv("DB_PORT", "5432")
+    database = os.getenv("DB_NAME", "Home_Expenses")
+    user = os.getenv("DB_USER", "postgres")
+    password = os.getenv("DB_PASSWORD")
+
+    if not password:
+        raise ValueError(
+            "DB_PASSWORD is not configured. "
+            "Add DB_PASSWORD to your .env file."
+        )
 
     return psycopg2.connect(
-        host=HOST,
-        port=PORT,
-        database=DATABASE,
-        user=USER,
-        password=PASSWORD
+        host=host,
+        port=port,
+        database=database,
+        user=user,
+        password=password,
+        connect_timeout=10
     )
 
 
@@ -40,6 +95,18 @@ def execute_query(
     fetch=False,
     fetch_one=False
 ):
+    """
+    Execute a PostgreSQL query.
+
+    fetch=True:
+        Return all rows.
+
+    fetch_one=True:
+        Return one row.
+
+    Otherwise:
+        Commit INSERT / UPDATE / DELETE.
+    """
 
     connection = get_connection()
 
@@ -66,15 +133,11 @@ def execute_query(
 
         cursor.close()
 
-        if not fetch and not fetch_one:
-            connection.commit()
-
         return result
 
     except Exception:
 
         connection.rollback()
-
         raise
 
     finally:
@@ -112,7 +175,9 @@ def get_categories(category_type=None):
             category_name,
             category_type
         FROM categories
-        ORDER BY category_type, category_name
+        ORDER BY
+            category_type,
+            category_name
     """
 
     return execute_query(
@@ -310,6 +375,17 @@ def add_or_update_budget(
     budget_amount
 ):
 
+    # Always store first day of the month.
+    # This prevents duplicate budget records for
+    # different dates within the same month.
+
+    if hasattr(budget_month, "replace"):
+
+        try:
+            budget_month = budget_month.replace(day=1)
+        except TypeError:
+            pass
+
     query = """
         INSERT INTO budgets
         (
@@ -442,6 +518,7 @@ def get_category_expense_summary():
     query = """
         SELECT
             c.category_name,
+
             COALESCE(
                 SUM(t.amount),
                 0
@@ -554,42 +631,68 @@ def get_payment_method_summary():
 
 
 # =========================================================
-# TEST DATABASE CONNECTION
+# DATABASE CONNECTION TEST
 # =========================================================
 
-if __name__ == "__main__":
+def test_connection():
+
+    connection = None
 
     try:
 
         connection = get_connection()
 
-        print("====================================")
-        print("PostgreSQL Connection Successful")
-        print("====================================")
-
         cursor = connection.cursor()
 
         cursor.execute(
-            "SELECT current_database();"
+            "SELECT current_database(), current_user;"
         )
 
-        database_name = cursor.fetchone()
-
-        print(
-            "Database:",
-            database_name[0]
-        )
+        result = cursor.fetchone()
 
         cursor.close()
 
-        connection.close()
+        return {
+            "success": True,
+            "database": result[0],
+            "user": result[1]
+        }
 
-        print("Connection closed.")
+    except Exception as error:
 
-    except Exception as e:
+        return {
+            "success": False,
+            "error": str(error)
+        }
 
-        print("====================================")
+    finally:
+
+        if connection is not None:
+            connection.close()
+
+
+# =========================================================
+# RUN DATABASE TEST
+# =========================================================
+
+if __name__ == "__main__":
+
+    print("=" * 50)
+    print("HOME EXPENSES - POSTGRESQL CONNECTION TEST")
+    print("=" * 50)
+
+    result = test_connection()
+
+    if result["success"]:
+
+        print("PostgreSQL Connection Successful")
+        print("Database :", result["database"])
+        print("User     :", result["user"])
+
+    else:
+
         print("PostgreSQL Connection Failed")
-        print("====================================")
+        print()
+        print(result["error"])
 
-        print(e)
+    print("=" * 50)
